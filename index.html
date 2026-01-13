@@ -2453,16 +2453,19 @@
           }
           console.log("Transaction details:", tx);
 
-          // Extract transaction information
-          const value =
-            tx.meta?.postBalances && tx.meta?.preBalances
-              ? Math.abs(tx.meta.postBalances[0] - tx.meta.preBalances[0]) /
-              solanaWeb3.LAMPORTS_PER_SOL
-              : 0;
-
+          // Calculate fee first
           const fee = tx.meta?.fee
             ? tx.meta.fee / solanaWeb3.LAMPORTS_PER_SOL
             : 0;
+
+          // Extract transaction information
+          // Sender's balance change includes both transfer amount and fee
+          // So we subtract the fee to get just the transfer amount
+          const value =
+            tx.meta?.postBalances && tx.meta?.preBalances
+              ? (Math.abs(tx.meta.postBalances[0] - tx.meta.preBalances[0]) /
+                solanaWeb3.LAMPORTS_PER_SOL) - fee
+              : 0;
 
           const timestamp = tx.blockTime
             ? getFormattedTime(tx.blockTime)
