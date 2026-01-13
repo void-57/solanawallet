@@ -2578,11 +2578,111 @@
               status === "confirmed" ? `Included in Slot #${tx.slot}` : "";
           }
 
-          // Fill in transaction details
+          
+          // Extract sender and receiver from transaction
+          let sender = "Unknown";
+          let receiver = "Unknown";
+          let transactionType = "transfer"; // transfer, swap, nft_mint, other
+
+          const accountKeys = tx.transaction?.message?.accountKeys || [];
+          const instructions = tx.transaction?.message?.instructions || [];
+          const logMessages = tx.meta?.logMessages || [];
+
+          // Check if this is an NFT mint by looking at log messages
+          const isNFTMint = logMessages.some(log =>
+            log.includes("MintToCollectionV1") ||
+            log.includes("MintV1") ||
+            log.includes("Bubblegum") ||
+            (log.includes("Instruction: Mint") && !log.includes("MintTo") && !log.includes("JUP"))
+          );
+
+          if (isNFTMint) {
+            transactionType = "nft_mint";
+            sender = "NFT Mint";
+            receiver = accountKeys[0]?.toString() || "Unknown";
+          }
+          // Check if this is a token swap by looking at token balance changes
+          else if (tx.meta?.preTokenBalances && tx.meta?.postTokenBalances) {
+            const preTokens = tx.meta.preTokenBalances;
+            const postTokens = tx.meta.postTokenBalances;
+
+            // Find tokens that decreased (sent)
+            let tokenSent = null;
+            let tokenReceived = null;
+
+            for (const preTok of preTokens) {
+              const postTok = postTokens.find(p => p.accountIndex === preTok.accountIndex);
+              if (postTok) {
+                const preAmount = parseFloat(preTok.uiTokenAmount.amount);
+                const postAmount = parseFloat(postTok.uiTokenAmount.amount);
+
+                // Token amount decreased significantly (sent/swapped)
+                if (preAmount > postAmount && (preAmount - postAmount) > 0.000001) {
+                  tokenSent = {
+                    mint: preTok.mint,
+                    amount: preTok.uiTokenAmount.uiAmountString,
+                    symbol: preTok.mint === "So11111111111111111111111111111111111111112" ? "SOL" : preTok.mint
+                  };
+                }
+
+                // Token amount increased significantly (received)
+                if (postAmount > preAmount && (postAmount - preAmount) > 0.000001) {
+                  tokenReceived = {
+                    mint: postTok.mint,
+                    amount: postTok.uiTokenAmount.uiAmountString,
+                    symbol: postTok.mint === "So11111111111111111111111111111111111111112" ? "SOL" : postTok.mint
+                  };
+                }
+              }
+            }
+
+            // If we found a token swap, use that instead of FROM/TO
+            if (tokenSent && tokenReceived) {
+              transactionType = "swap";
+              sender = `${tokenSent.symbol}`;
+              receiver = `${tokenReceived.symbol}`;
+            }
+          }
+
+          // If not a swap or NFT mint, try to find the transfer instruction
+          if (transactionType === "transfer") {
+            for (const ix of instructions) {
+              if (ix.accounts && ix.accounts.length >= 2) {
+                if (ix.data) {
+                  try {
+                    const dataBytes = bs58.decode(ix.data);
+                    if (dataBytes[0] === 2) {
+                      sender = accountKeys[ix.accounts[0]]?.toString() || "Unknown";
+                      receiver = accountKeys[ix.accounts[1]]?.toString() || "Unknown";
+                      break;
+                    }
+                  } catch (e) {
+                    // If decode fails, continue
+                  }
+                }
+              }
+            }
+
+            // Fallback: use balance changes to determine sender/receiver
+            if (sender === "Unknown" && tx.meta?.preBalances && tx.meta?.postBalances) {
+              for (let i = 0; i < accountKeys.length; i++) {
+                const balanceChange = tx.meta.postBalances[i] - tx.meta.preBalances[i];
+                if (balanceChange < -100000 && sender === "Unknown") {
+                  sender = accountKeys[i]?.toString() || "Unknown";
+                }
+                if (balanceChange > 100000 && receiver === "Unknown") {
+                  receiver = accountKeys[i]?.toString() || "Unknown";
+                }
+              }
+            }
+
+            // Final fallback: use first account as sender
+            if (sender === "Unknown" && accountKeys[0]) {
+              sender = accountKeys[0]?.toString() || "Unknown";
+            }
+          }
+
           if (getRef("tx_from")) {
-            const sender =
-              tx.transaction?.message?.accountKeys?.[0]?.toString() ||
-              "Unknown";
             getRef("tx_from").value = sender;
             getRef("tx_from").addEventListener("click", function (e) {
               if (
@@ -2601,9 +2701,6 @@
           }
 
           if (getRef("tx_to")) {
-            const receiver =
-              tx.transaction?.message?.accountKeys?.[1]?.toString() ||
-              "Unknown";
             getRef("tx_to").value = receiver;
             getRef("tx_to").addEventListener("click", function (e) {
               if (
@@ -2682,49 +2779,6 @@
           if (currentCurrency !== "sol" && !isHistoricApiAvailable) {
             testHistoricalAPIAndRenderToggle();
           }
-
-          let sender = "Unknown";
-          let receiver = "Unknown";
-
-          const message = tx.transaction?.message;
-          const accountKeys =
-            message?.staticAccountKeys || message?.accountKeys || [];
-          const instructions =
-            message?.compiledInstructions || message?.instructions || [];
-
-          // Try to extract from parsed instructions (for parsed transactions)
-          if (instructions && instructions.length > 0) {
-            // Try to find a transfer instruction (SPL or System)
-            for (const ix of instructions) {
-              // For parsed transactions (if available)
-              if (ix.parsed && ix.parsed.info) {
-                if (ix.parsed.info.source && ix.parsed.info.destination) {
-                  sender = ix.parsed.info.source;
-                  receiver = ix.parsed.info.destination;
-                  break;
-                }
-                if (ix.parsed.info.authority && ix.parsed.info.destination) {
-                  sender = ix.parsed.info.authority;
-                  receiver = ix.parsed.info.destination;
-                  break;
-                }
-              }
-              // For raw instructions (like in your prompt)
-              if (ix.accountKeyIndexes && ix.accountKeyIndexes.length >= 2) {
-                sender = accountKeys[ix.accountKeyIndexes[0]] || "Unknown";
-                receiver = accountKeys[ix.accountKeyIndexes[1]] || "Unknown";
-                break;
-              }
-            }
-          }
-
-          // Fallback: just use first two account keys
-          if (sender === "Unknown" && accountKeys[0]) sender = accountKeys[0];
-          if (receiver === "Unknown" && accountKeys[1])
-            receiver = accountKeys[1];
-
-          if (getRef("tx_from")) getRef("tx_from").value = sender;
-          if (getRef("tx_to")) getRef("tx_to").value = receiver;
         })
         .catch((error) => {
           console.error("Error:", error);
@@ -2766,7 +2820,6 @@
         );
       }
     }
-
     async function fetchSolanaTransactionDetails(signature) {
       try {
         // Check for valid signature format
