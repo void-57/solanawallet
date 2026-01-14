@@ -1182,6 +1182,7 @@
       async update(newElements) {
         this.elementsToRender = newElements;
         this.currentPage = 1;
+        currentPage = 1; // Sync global state
         this.totalPages = Math.ceil(newElements.length / this.pageSize);
         await this.renderCurrentPage();
         this.renderPagination();
@@ -1299,35 +1300,80 @@
       }
 
       async fetchNextPage() {
-        if (!hasMoreTransactions) return;
-
-        // Show loading state
-        this.container.innerHTML =
-          '<sm-spinner class="justify-self-center margin-top-1-5"></sm-spinner>';
-
         try {
-          const addressInput = currentWalletAddress;
+          const targetPage = this.currentPage + 1;
+          console.log(`Going to next page: ${targetPage}`);
 
+          // Check if we have cached data for this page
+          if (transactionPageCache.has(targetPage)) {
+            console.log(`Using cached data for page ${targetPage}`);
+            const cachedPage = transactionPageCache.get(targetPage);
+
+            // Apply current filter
+            const filter =
+              document.getElementById("filter_selector")?.value || "all";
+            let filteredTransactions = cachedPage.formatted;
+
+            if (filter === "sent") {
+              filteredTransactions = cachedPage.formatted.filter(
+                (tx) => tx.type === "out"
+              );
+            } else if (filter === "received") {
+              filteredTransactions = cachedPage.formatted.filter(
+                (tx) => tx.type === "in"
+              );
+            }
+
+            // Clear container and render cached transactions
+            this.container.innerHTML = "";
+
+            if (filteredTransactions.length > 0) {
+              for (const tx of filteredTransactions) {
+                try {
+                  const card = await this.renderFn(tx);
+                  if (card && card instanceof Element) {
+                    this.container.appendChild(card);
+                  }
+                } catch (error) {
+                  console.error("Error rendering transaction card:", error);
+                }
+              }
+            } else {
+              this.container.innerHTML =
+                '<p class="text-center margin-top-2">No transactions found for this filter</p>';
+            }
+
+            // Update page state
+            this.currentPage = targetPage;
+            currentPage = targetPage; // Sync global state
+
+            // Update page indicator
+            const pageInfo = document.getElementById("page_info");
+            if (pageInfo) pageInfo.textContent = `Page ${this.currentPage}`;
+
+            // Update button states
+            const prevButton = document.querySelector(
+              ".pagination-controls button:first-child"
+            );
+            if (prevButton) prevButton.disabled = this.currentPage <= 1;
+
+            const nextButton = document.getElementById("next_page_button");
+            if (nextButton) nextButton.disabled = !hasMoreTransactions && this.currentPage >= transactionPageCache.size;
+
+            return;
+          }
+
+          // If not in cache, fetch new transactions from blockchain
+          if (!hasMoreTransactions) return;
+
+          // Show loading state
+          this.container.innerHTML =
+            '<sm-spinner class="justify-self-center margin-top-1-5"></sm-spinner>';
+
+          const addressInput = currentWalletAddress;
           if (!addressInput) {
             this.container.innerHTML =
               '<p class="text-center margin-top-2">No address input found</p>';
-            return;
-          }
-
-          const address = addressInput;
-          if (!address) {
-            this.container.innerHTML =
-              '<p class="text-center margin-top-2">No address specified</p>';
-            return;
-          }
-
-          console.log("Fetching next page for address:", address);
-
-          try {
-            new solanaWeb3.PublicKey(address);
-          } catch (error) {
-            this.container.innerHTML =
-              '<p class="text-center margin-top-2">Invalid address</p>';
             return;
           }
 
@@ -1338,64 +1384,54 @@
             return;
           }
 
-          console.log(
-            "Fetching next page with signature:",
-            lastFetchedSignature
-          );
-
           // Get next batch of signatures using the last signature from previous batch
           const newSignatures = await getSolanaTransactionHistory(
-            address,
+            addressInput,
             lastFetchedSignature,
             false
           );
-
-          console.log("Fetched new signatures:", newSignatures?.length);
 
           if (!newSignatures || newSignatures.length === 0) {
             hasMoreTransactions = false;
             this.container.innerHTML =
               '<p class="text-center margin-top-2">No more transactions to load</p>';
-
-            // Update button states
-            getRef("next_page_button").disabled = true;
+            const nextBtn = document.getElementById("next_page_button");
+            if (nextBtn) nextBtn.disabled = true;
             return;
           }
 
           // Process the new transactions
           const newTransactions = await processTransactions(newSignatures);
 
-          // Format and filter the transactions using the specific formatTransaction function
-          const formattedTxs = newTransactions.map((tx) => {
-            return formatTransaction(address, tx);
+          // Format
+          const formattedTxsBatch = newTransactions.map((tx) => {
+            return formatTransaction(addressInput, tx);
           });
 
-          // Save this page for instant backward navigation
-          transactionPageCache.set(currentPage + 1, {
+          // Save this page for instant navigation
+          transactionPageCache.set(targetPage, {
             signatures: newSignatures,
             transactions: newTransactions,
-            formatted: formattedTxs
+            formatted: formattedTxsBatch
           });
 
           // Apply current filter
           const filterSelector = document.getElementById("filter_selector");
           const filter = filterSelector ? filterSelector.value : "all";
-          let filteredTransactions = formattedTxs;
+          let filteredTransactions = formattedTxsBatch;
 
           if (filter === "sent") {
-            filteredTransactions = formattedTxs.filter(
+            filteredTransactions = formattedTxsBatch.filter(
               (tx) => tx.type === "out"
             );
           } else if (filter === "received") {
-            filteredTransactions = formattedTxs.filter(
+            filteredTransactions = formattedTxsBatch.filter(
               (tx) => tx.type === "in"
             );
           }
 
-          // Clear previous content and show new transactions
+          // Render
           this.container.innerHTML = "";
-
-          // Add new transactions to the display
           if (filteredTransactions.length > 0) {
             for (const tx of filteredTransactions) {
               try {
@@ -1410,20 +1446,21 @@
               '<p class="text-center margin-top-2">No transactions found for this filter</p>';
           }
 
-          currentPage++;
+          this.currentPage = targetPage;
+          currentPage = targetPage; // Sync global state
 
-          // Update page indicator
+          // Update UI
           const pageInfo = document.getElementById("page_info");
-          if (pageInfo) pageInfo.textContent = `Page ${currentPage}`;
+          if (pageInfo) pageInfo.textContent = `Page ${this.currentPage}`;
 
-          // Update button states
-          const prevButton = document.querySelector(
+          const prevBtn = document.querySelector(
             ".pagination-controls button:first-child"
           );
-          if (prevButton) prevButton.disabled = false;
+          if (prevBtn) prevBtn.disabled = false;
 
-          const nextButton = document.getElementById("next_page_button");
-          if (nextButton) nextButton.disabled = !hasMoreTransactions;
+          const nextBtn = document.getElementById("next_page_button");
+          if (nextBtn) nextBtn.disabled = !hasMoreTransactions;
+
         } catch (error) {
           console.error("Error fetching next page:", error, error.stack);
           this.container.innerHTML =
@@ -1448,7 +1485,7 @@
             return;
           }
 
-          const targetPage = currentPage - 1;
+          const targetPage = this.currentPage - 1;
           console.log(`Going to previous page: ${targetPage}`);
 
           // Check if we have cached data for this page
@@ -1491,17 +1528,18 @@
             }
 
             // Update page state
-            currentPage = targetPage;
+            this.currentPage = targetPage;
+            currentPage = targetPage; // Sync global state
 
             // Update page indicator
             const pageInfo = document.getElementById("page_info");
-            if (pageInfo) pageInfo.textContent = `Page ${currentPage}`;
+            if (pageInfo) pageInfo.textContent = `Page ${this.currentPage}`;
 
             // Update button states
             const prevButton = document.querySelector(
               ".pagination-controls button:first-child"
             );
-            if (prevButton) prevButton.disabled = currentPage <= 1;
+            if (prevButton) prevButton.disabled = this.currentPage <= 1;
 
             const nextButton = document.getElementById("next_page_button");
             if (nextButton) nextButton.disabled = false; // Can always go forward from cached page
@@ -1698,7 +1736,7 @@
 
         const preBalance = tx.meta.preBalances[addressIndex] || 0;
         const postBalance = tx.meta.postBalances[addressIndex] || 0;
-        return (postBalance - preBalance) / solanaWeb3.LAMPORTS_PER_SOL;
+        return Number(((postBalance - preBalance) / solanaWeb3.LAMPORTS_PER_SOL).toFixed(9));
       } catch (error) {
         console.error("Error calculating transaction amount:", error);
         return 0;
@@ -1775,70 +1813,7 @@
             );
             transactionsLazyLoader.init();
           }
-          // Handle filter changes
-          getRef("filter_selector").addEventListener("change", async (e) => {
-            const address = currentWalletAddress;
-            if (!address) return;
 
-            // Show loading state
-            getRef("transactions_list").innerHTML =
-              '<sm-spinner class="justify-self-center margin-top-1-5"></sm-spinner>';
-
-            try {
-              // Don't refetch transactions - use the already processed ones stored in memory
-              // Just filter what we already have
-              const filter = e.target.value || "all";
-              let filteredTransactions;
-
-              if (filter === "sent") {
-                filteredTransactions = formattedTxs.filter(
-                  (tx) => tx.type === "out"
-                );
-              } else if (filter === "received") {
-                filteredTransactions = formattedTxs.filter(
-                  (tx) => tx.type === "in"
-                );
-              } else {
-                // "all" filter - use all transactions
-                filteredTransactions = formattedTxs;
-              }
-
-              // Clear container
-              getRef("transactions_list").innerHTML = "";
-
-              // Render filtered transactions
-              if (filteredTransactions.length > 0) {
-                for (const tx of filteredTransactions) {
-                  try {
-                    const card = await render.transactionCard(tx);
-                    if (card) getRef("transactions_list").appendChild(card);
-                  } catch (error) {
-                    console.error("Error rendering transaction card:", error);
-                  }
-                }
-              } else {
-                getRef("transactions_list").innerHTML =
-                  '<p class="text-center margin-top-2">No transactions found for this filter</p>';
-              }
-
-              // Update pagination info
-              const pageInfo = document.getElementById("page_info");
-              if (pageInfo) pageInfo.textContent = `Page ${currentPage}`;
-
-              // Update button states
-              const prevButton = document.querySelector(
-                ".pagination-controls button:first-child"
-              );
-              if (prevButton) prevButton.disabled = currentPage <= 1;
-
-              const nextButton = document.getElementById("next_page_button");
-              if (nextButton) nextButton.disabled = !hasMoreTransactions;
-            } catch (error) {
-              console.error("Error applying filter:", error);
-              getRef("transactions_list").innerHTML =
-                '<p class="text-center margin-top-2">Error filtering transactions</p>';
-            }
-          });
 
           // Enable transaction card click to view details
           const list = getRef("transactions_list");
@@ -2130,6 +2105,47 @@
       }
     }
 
+    
+    async function applyFilter() {
+      const filterSelector = document.getElementById("filter_selector");
+      if (!filterSelector) return;
+
+      const filter = filterSelector.value || "all";
+      const container = document.getElementById("transactions_list");
+      if (!container) return;
+
+      // Get current page data from cache
+      const cachedPage = transactionPageCache.get(currentPage);
+      if (!cachedPage) return;
+
+      let filtered = cachedPage.formatted;
+      if (filter === "sent") {
+        filtered = cachedPage.formatted.filter((tx) => tx.type === "out");
+      } else if (filter === "received") {
+        filtered = cachedPage.formatted.filter((tx) => tx.type === "in");
+      }
+
+      // Show loading spinner for visual feedback
+      container.innerHTML = '<div class="flex justify-center w-100 margin-top-2"><sm-spinner></sm-spinner></div>';
+
+      // Use a timeout to let the spinner show and keep UI snappy
+      setTimeout(async () => {
+        const filteredList = filtered; // Capture current filtered state
+
+        // Render all cards first in memory to avoid jumping
+        const cards = await Promise.all(filteredList.map(tx => render.transactionCard(tx)));
+
+        container.innerHTML = "";
+        if (cards.length > 0) {
+          cards.forEach(card => {
+            if (card) container.appendChild(card);
+          });
+        } else {
+          container.innerHTML = '<p class="text-center margin-top-2">No transactions found for this filter in this page</p>';
+        }
+      }, 300);
+    }
+
     function handleInvalidSearch() {
       if (document.startViewTransition)
         document.startViewTransition(() => {
@@ -2249,10 +2265,7 @@
                     <h4>Transactions</h4>
                     <sm-chips
                       id="filter_selector"
-                      onchange=${(e) =>
-            render.transactions(
-              getRef("wallet_address_input").value
-            )}
+                      onchange=${() => applyFilter()}
                     >
                       <sm-chip value="all" selected>All</sm-chip>
                       <sm-chip value="sent">Sent</sm-chip>
@@ -2972,9 +2985,9 @@
               <div class="error-state">
                 <div class="error-icon">⚠️</div>
                 <h3>Error Loading Transaction</h3>
-                <p></p>
-                <button
-                  <button
+                <p>Failed to fetch transaction details. Please try again later.</p>
+                <button class="button" onclick="location.reload()">
+                  Retry
                 </button>
               </div>
             `
@@ -3738,25 +3751,7 @@
 
       return uint8Array;
     }
-    function bnObjectToUint8(bnObject) {
-      const bn = bnObject._bn; // Extract the BN instance from the object
-      const words = bn.words; // Get the words array from the BN instance
 
-      // Convert each word to its corresponding bytes
-      const byteArray = [];
-      for (let i = 0; i < words.length; i++) {
-        const word = words[i];
-        byteArray.push((word >> 24) & 0xff); // Extract first byte
-        byteArray.push((word >> 16) & 0xff); // Extract second byte
-        byteArray.push((word >> 8) & 0xff); // Extract third byte
-        byteArray.push(word & 0xff); // Extract fourth byte
-      }
-
-      // Create Uint8Array from the byte array
-      const uint8Array = new Uint8Array(byteArray);
-
-      return uint8Array;
-    }
     function retrieveSolanaAddr() {
       function retrieve() {
         let seed = getRef("retrieve_btc_addr_field").value.trim();
